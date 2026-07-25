@@ -356,7 +356,8 @@ export const TOOLS: ToolDef[] = [
     name: "find_free_time",
     description:
       "Find open slots of a given length inside working hours, based on existing busy events. " +
-      "Events marked 'free' or cancelled are ignored.",
+      "Cancelled events and ones marked 'free' are ignored, and so are all-day events — those usually mark " +
+      "a milestone or a multi-day period rather than a full day of unavailability. Set allDayIsBusy=true to count them.",
     inputSchema: {
       type: "object",
       properties: {
@@ -372,6 +373,12 @@ export const TOOLS: ToolDef[] = [
           description: "End of the working day in minutes past midnight. Default 1080 (18:00).",
         },
         weekdaysOnly: { type: "boolean", description: "Default true." },
+        allDayIsBusy: {
+          type: "boolean",
+          description:
+            "Count all-day events as blocking the whole day. Default false, because multi-day all-day " +
+            "markers would otherwise wipe out every slot in the range.",
+        },
         calendarIds: { type: "array", items: { type: "string" } },
         maxSlots: { type: "integer", description: "Default 20." },
       },

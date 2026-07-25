@@ -1100,9 +1100,14 @@ final class Bridge {
             let weekdaysOnly = p.bool("weekdaysOnly", default: true)
             let maxSlots = p.int("maxSlots") ?? 20
 
+            // All-day events mean "this happens today", not "every hour is taken" — they are
+            // routinely multi-day milestone markers, and counting them as busy blanks out whole
+            // weeks. Excluded unless the caller asks for them.
+            let allDayIsBusy = p.bool("allDayIsBusy", default: false)
             let pred = store.predicateForEvents(withStart: start, end: end, calendars: cals)
             var busy: [(Date, Date)] = store.events(matching: pred)
                 .filter { $0.status != .canceled && $0.availability != .free }
+                .filter { allDayIsBusy || !$0.isAllDay }
                 .map { ($0.startDate, $0.endDate) }
                 .sorted { $0.0 < $1.0 }
 
