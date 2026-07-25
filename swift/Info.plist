@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.howiez.planner4mcp.ekbridge</string>
+	<key>CFBundleName</key>
+	<string>planner4mcp EventKit bridge</string>
+	<key>CFBundleDisplayName</key>
+	<string>planner4mcp</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>planner4mcp reads and edits your calendar events on your behalf.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>planner4mcp reads and edits your reminders on your behalf.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>planner4mcp reads and edits your calendar events on your behalf.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>planner4mcp reads and edits your reminders on your behalf.</string>
+</dict>
+</plist>
