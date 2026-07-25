@@ -65,8 +65,54 @@ echo "── 注册到 Claude 桌面端 ──"
 bash "$REPO/scripts/register-desktop.sh"
 echo
 
+# ─── 5. PLANNER4MCP_HOME ────────────────────────────────────────
+# 跟着 iCloud / git 同步的 .mcp.json 里写的是
+#   ${PLANNER4MCP_HOME:-<某台机器的绝对路径>}/bin/planner4mcp
+# 所以每台机器都要让这个变量指向本机的仓库。
+#
+# 只写 shell profile 是不够的：GUI 启动的 App（Claude 桌面端，以及它内嵌的
+# claude-code）不继承登录 shell 的环境变量，会静默回落到默认路径。所以同时用
+# LaunchAgent 在每次登录时 launchctl setenv，让 GUI 进程也能读到。
+echo "── 设置 PLANNER4MCP_HOME ──"
+PLIST="$HOME/Library/LaunchAgents/com.howiez.planner4mcp.env.plist"
+mkdir -p "$(dirname "$PLIST")"
+cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>com.howiez.planner4mcp.env</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/launchctl</string>
+		<string>setenv</string>
+		<string>PLANNER4MCP_HOME</string>
+		<string>$REPO</string>
+	</array>
+	<key>RunAtLoad</key><true/>
+</dict>
+</plist>
+PLISTEOF
+
+GUI="gui/$(id -u)"
+launchctl bootout "$GUI/com.howiez.planner4mcp.env" 2>/dev/null || true
+launchctl bootstrap "$GUI" "$PLIST" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null || true
+launchctl setenv PLANNER4MCP_HOME "$REPO"   # 当前登录会话立即生效
+echo "✓ GUI 会话已生效（LaunchAgent: $PLIST）"
+
+# 终端场景
+PROFILE="$HOME/.zshrc"
+LINE="export PLANNER4MCP_HOME=\"$REPO\""
+if [ -f "$PROFILE" ] && grep -qF "PLANNER4MCP_HOME" "$PROFILE"; then
+  echo "✓ $PROFILE 里已有 PLANNER4MCP_HOME，未重复写入（如指向旧路径请手动改成 $REPO）"
+else
+  printf '\n# planner4mcp\n%s\n' "$LINE" >> "$PROFILE"
+  echo "✓ 已追加到 $PROFILE"
+fi
+echo
+
 echo "── 注册到 Claude Code（可选，终端里用）──"
 echo "在你想用它的项目目录下跑："
-echo "  claude mcp add planner4mcp -- $NODE_BIN $REPO/dist/index.js"
+echo "  claude mcp add planner4mcp -- $REPO/bin/planner4mcp"
 echo
 echo "全部完成。Cmd+Q 退出 Claude 桌面端再重开即可生效。"

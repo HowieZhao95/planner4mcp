@@ -33,7 +33,10 @@ else
   echo "配置文件不存在，已新建"
 fi
 
-CFG="$CFG" NODE_BIN="$NODE_BIN" ENTRY_PATH="$ENTRY_PATH" python3 <<'PY'
+LAUNCHER="$REPO/bin/planner4mcp"
+[ -x "$LAUNCHER" ] || { echo "✗ 找不到可执行的 $LAUNCHER"; exit 1; }
+
+CFG="$CFG" LAUNCHER="$LAUNCHER" python3 <<'PY'
 import json, os
 
 cfg_path = os.environ["CFG"]
@@ -45,10 +48,10 @@ servers = cfg.setdefault("mcpServers", {})
 print("现有 MCP server:", ", ".join(servers) or "(无)")
 
 before = servers.get("planner4mcp")
-servers["planner4mcp"] = {
-    "command": os.environ["NODE_BIN"],
-    "args": [os.environ["ENTRY_PATH"]],
-}
+# Point at the launcher rather than at a specific node binary: it resolves the
+# repo and a Node >= 18 at spawn time, so this entry survives a node upgrade or
+# an nvm switch that moves the interpreter out from under us.
+servers["planner4mcp"] = {"command": os.environ["LAUNCHER"]}
 
 if before == servers["planner4mcp"]:
     print("planner4mcp 已存在且配置一致，未改动")

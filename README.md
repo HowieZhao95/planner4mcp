@@ -77,24 +77,49 @@ tccutil reset Calendar com.howiez.planner4mcp.ekbridge
 tccutil reset Reminders com.howiez.planner4mcp.ekbridge
 ```
 
-## Registering with Claude Code
+## Registering with a client
+
+Point clients at `bin/planner4mcp` rather than at `node dist/index.js`. The launcher resolves
+the repo root and a Node ≥ 18 at spawn time, so the entry survives a Node upgrade, an nvm
+switch, or being copied to a Mac where Homebrew lives at `/usr/local` instead of
+`/opt/homebrew`.
 
 ```bash
-claude mcp add planner4mcp -- /opt/homebrew/bin/node /Users/howiez/dev-Loc/Project/planner4mcp/dist/index.js
+claude mcp add planner4mcp -- /path/to/planner4mcp/bin/planner4mcp
 ```
 
-Or in a client's JSON config:
+```json
+{
+  "mcpServers": {
+    "planner4mcp": { "command": "/path/to/planner4mcp/bin/planner4mcp" }
+  }
+}
+```
+
+`scripts/register-desktop.sh` writes that entry into Claude Desktop's config for you. It backs
+the file up first and leaves any other servers alone.
+
+### Configs that sync between machines
+
+A `.mcp.json` living in a synced folder — an iCloud-backed Obsidian vault, a shared git repo —
+lands on every machine, so an absolute path in it is guaranteed to be wrong on one of them.
+Claude Code expands `${VAR}` and `${VAR:-default}`, so write it as:
 
 ```json
 {
   "mcpServers": {
     "planner4mcp": {
-      "command": "/opt/homebrew/bin/node",
-      "args": ["/Users/howiez/dev-Loc/Project/planner4mcp/dist/index.js"]
+      "command": "${PLANNER4MCP_HOME:-/absolute/path/on/your/main/mac}/bin/planner4mcp"
     }
   }
 }
 ```
+
+Then each machine only has to define `PLANNER4MCP_HOME`. Note that exporting it from `.zshrc`
+covers terminal use only — **GUI apps do not inherit the login shell's environment**, so Claude
+Desktop (and the claude-code it embeds) would silently fall back to the default path.
+`scripts/setup-new-mac.sh` handles both: it appends the export to `.zshrc` *and* installs a
+LaunchAgent that runs `launchctl setenv` at login so GUI processes see it too.
 
 ## Using it on another Mac
 

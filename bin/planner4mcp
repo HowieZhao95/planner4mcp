@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Launcher for the planner4mcp MCP server.
+#
+# Exists so that MCP client configs only have to name this one file. It works
+# out its own repo root (following symlinks, so it can be linked into ~/.local/bin)
+# and picks a Node >= 18 itself — which is what keeps a config portable between an
+# Apple Silicon Mac (/opt/homebrew) and an Intel one (/usr/local), and past a
+# system `node` that is too old.
+#
+# stdout is the MCP channel: every diagnostic here must go to stderr.
+
+set -euo pipefail
+
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  dir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  [[ "$self" != /* ]] && self="$dir/$self"
+done
+REPO="$(cd -P "$(dirname "$self")/.." && pwd)"
+
+ENTRY="$REPO/dist/index.js"
+if [ ! -f "$ENTRY" ]; then
+  echo "planner4mcp: $ENTRY is missing — run 'npm install && npm run build' in $REPO" >&2
+  exit 1
+fi
+
+for candidate in "${PLANNER4MCP_NODE:-}" "$(command -v node || true)" \
+                 /opt/homebrew/bin/node /usr/local/bin/node; do
+  [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+  major="$("$candidate" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null || echo 0)"
+  if [ "$major" -ge 18 ] 2>/dev/null; then
+    exec "$candidate" "$ENTRY" "$@"
+  fi
+done
+
+echo "planner4mcp: no Node >= 18 found (looked at PLANNER4MCP_NODE, PATH, /opt/homebrew/bin, /usr/local/bin)" >&2
+exit 1
