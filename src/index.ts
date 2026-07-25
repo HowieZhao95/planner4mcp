@@ -11,6 +11,12 @@ import { TOOLS, callTool } from "./tools.js";
 const INSTRUCTIONS = `Read and write the user's Apple Calendar and Reminders on this Mac, via EventKit.
 
 Working rules:
+- For open questions about what the user has on ("what's today", "how's my week", "what am I behind on"), start with
+  list_agenda: one time-ordered view of events and dated reminders together, plus what is overdue. Reach for
+  list_events or list_reminders when the user clearly means only one kind, or when you need fields the agenda omits.
+- Events and reminders are different kinds of object and stay that way: an event occupies a span of time, a reminder
+  is a due point with a completion state. They live in one store but cannot be converted into each other, and a
+  reminder has no end time. Do not describe them to the user as two systems that need syncing.
 - Ids are opaque. Always resolve names to ids with list_calendars / list_events / list_reminders before editing or deleting.
 - Dates accept ISO-8601 with offset, local wall-clock without offset, or date-only (which means all-day / no time).
 - Recurring events are returned as individual occurrences. To change or delete just one, pass its occurrenceDate;

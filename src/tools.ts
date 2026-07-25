@@ -387,6 +387,55 @@ export const TOOLS: ToolDef[] = [
 
   // ---- reminders ----
   {
+    name: "list_agenda",
+    description:
+      "One time-ordered view of everything on the user's plate — calendar events and dated reminders merged, " +
+      "grouped by day, plus anything already overdue. Prefer this for open questions like \"what's on today\", " +
+      "\"what does my week look like\", \"what am I behind on\". Use list_events or list_reminders instead when " +
+      "the user clearly means only one of the two, or when you need fields this view leaves out. " +
+      "Note events and reminders stay distinct here (`kind`) because they are different things: an event occupies " +
+      "a span of time, a reminder is a due point with a completion state. Nothing is merged at the data level.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        start: { type: "string", description: `Window start. ${DATE_HINT} Default: today.` },
+        end: { type: "string", description: `Window end. ${DATE_HINT} Default: 7 days out.` },
+        calendarIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Restrict the event side. Omit for all calendars.",
+        },
+        listIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Restrict the reminder side. Omit for all lists.",
+        },
+        includeCompleted: {
+          type: "boolean",
+          description: "Include finished reminders. Default false.",
+        },
+        includeOverdue: {
+          type: "boolean",
+          description:
+            "Include incomplete reminders that came due before the window. Default true — these are usually the point.",
+        },
+        includeUndated: {
+          type: "boolean",
+          description:
+            "Also return reminders that have no due date at all, in a separate `undated` bucket. Default false, " +
+            "since these can number in the hundreds.",
+        },
+        collapsePairs: {
+          type: "boolean",
+          description:
+            "When an event and a reminder share a title and a moment — a mirrored pair — show them as one entry " +
+            "carrying both ids (`alsoAReminder`, `reminderId`). Default true. Set false to see the raw objects.",
+        },
+        limit: { type: "integer", description: "Per side. Default 500." },
+      },
+    },
+  },
+  {
     name: "list_reminders",
     description:
       "List reminders, optionally filtered by list, completion state, due-date window, or text. " +
@@ -515,6 +564,101 @@ export const TOOLS: ToolDef[] = [
   },
 ];
 
+// ---------------------------------------------------------------- agenda
+
+interface AgendaItem {
+  kind: "event" | "reminder";
+  id: string;
+  title: string;
+  [key: string]: unknown;
+}
+
+/** Local calendar date of an emitted value — works for `2026-07-26` and for a
+ *  full ISO string, because the bridge always writes the machine's own offset. */
+function dayKey(value: string | undefined | null): string | null {
+  return value ? value.slice(0, 10) : null;
+}
+
+function eventToItem(e: any): AgendaItem {
+  const from = dayKey(e.startISO ?? e.start);
+  const to = dayKey(e.endISO ?? e.end);
+  const item: AgendaItem = {
+    kind: "event",
+    id: e.id,
+    title: e.title,
+    allDay: e.allDay === true,
+    start: e.start,
+    end: e.end,
+    calendar: e.calendarTitle,
+  };
+  if (e.location) item.location = e.location;
+  if (e.occurrenceDate) item.occurrenceDate = e.occurrenceDate;
+  // Listed on its starting day only; this says how far it reaches.
+  if (from && to && to !== from) item.spansUntil = to;
+  return item;
+}
+
+function reminderToItem(r: any): AgendaItem {
+  const item: AgendaItem = {
+    kind: "reminder",
+    id: r.id,
+    title: r.title,
+    due: r.due?.dateTime ?? r.due?.date ?? null,
+    hasTime: r.due?.hasTime === true,
+    completed: r.completed === true,
+    list: r.listTitle,
+  };
+  if (r.priority) item.priority = r.priorityLabel;
+  return item;
+}
+
+/** All-day and untimed entries sort ahead of timed ones; ISO strings carrying the
+ *  same offset compare correctly as plain strings. */
+function withinDayKey(item: AgendaItem): string {
+  if (item.kind === "reminder") return item.hasTime ? String(item.due ?? "") : "";
+  return item.allDay ? "" : String(item.start ?? "");
+}
+
+/**
+ * Some stores carry the same commitment twice — an event and a reminder with the
+ * same title at the same moment, mirrored by an app or an automation. Listing both
+ * reads as duplication rather than as one thing to do, so a matched pair collapses
+ * into a single entry that keeps both ids.
+ */
+function collapsePairs(items: AgendaItem[]): AgendaItem[] {
+  const signature = (i: AgendaItem) =>
+    `${String(i.title).trim()}@${String(i.kind === "event" ? i.start : i.due ?? "")}`;
+
+  const reminders = new Map<string, AgendaItem>();
+  for (const i of items) {
+    if (i.kind === "reminder") reminders.set(signature(i), i);
+  }
+
+  const paired = new Set<string>();
+  const out: AgendaItem[] = [];
+  for (const i of items) {
+    if (i.kind !== "event") continue;
+    const match = reminders.get(signature(i));
+    if (match) {
+      paired.add(match.id as string);
+      out.push({
+        ...i,
+        kind: "event",
+        alsoAReminder: true,
+        reminderId: match.id,
+        reminderList: match.list,
+        reminderCompleted: match.completed,
+      });
+    } else {
+      out.push(i);
+    }
+  }
+  for (const i of items) {
+    if (i.kind === "reminder" && !paired.has(i.id)) out.push(i);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- dispatch
 
 const DRY_RUN_NOTE =
@@ -572,6 +716,103 @@ export async function callTool(
         end: a.end ?? localDay(7),
       });
       return { now: localNowISO(), timeZone: timeZoneName(), ...result };
+    }
+
+    case "list_agenda": {
+      const start = a.start ?? localDay(0);
+      const end = a.end ?? localDay(7);
+      const limit = a.limit ?? 500;
+      const status = a.includeCompleted === true ? "all" : "incomplete";
+
+      // Two queries because EventKit has two read paths, not because the data is
+      // split — same store, same connection. Only the presentation is merged.
+      const [eventsRes, datedRes, overdueRes, undatedRes] = await Promise.all([
+        bridge.call<any>("events.list", {
+          start,
+          end,
+          calendarIds: a.calendarIds,
+          limit,
+        }),
+        bridge.call<any>("reminders.list", {
+          listIds: a.listIds,
+          status,
+          dueStart: start,
+          dueEnd: end,
+          onlyWithDueDate: true,
+          limit,
+        }),
+        a.includeOverdue === false
+          ? Promise.resolve({ reminders: [] })
+          : bridge.call<any>("reminders.list", {
+              listIds: a.listIds,
+              status: "incomplete",
+              dueEnd: start,
+              onlyWithDueDate: true,
+              limit,
+            }),
+        a.includeUndated === true
+          ? bridge.call<any>("reminders.list", { listIds: a.listIds, status, limit })
+          : Promise.resolve({ reminders: [] }),
+      ]);
+
+      const events: AgendaItem[] = (eventsRes.events ?? []).map(eventToItem);
+      const dated: AgendaItem[] = (datedRes.reminders ?? []).map(reminderToItem);
+
+      // A reminder due exactly at the window start matches both queries.
+      const datedIds = new Set(dated.map((i) => i.id));
+      const overdue: AgendaItem[] = (overdueRes.reminders ?? [])
+        .map(reminderToItem)
+        .filter((i: AgendaItem) => !datedIds.has(i.id));
+
+      const undated: AgendaItem[] = (undatedRes.reminders ?? [])
+        .filter((r: any) => !r.due)
+        .map(reminderToItem);
+
+      const combined =
+        a.collapsePairs === false
+          ? [...events, ...dated]
+          : collapsePairs([...events, ...dated]);
+      const pairsCollapsed = events.length + dated.length - combined.length;
+
+      const windowStartDay: string = dayKey(String(start)) ?? String(start);
+      const byDay = new Map<string, AgendaItem[]>();
+      for (const item of combined) {
+        const own = dayKey(String(item.kind === "event" ? item.start : (item.due ?? "")));
+        if (!own) continue;
+        let key = own;
+        // Something already running when the window opens belongs to day one.
+        if (key < windowStartDay) {
+          item.startedEarlier = true;
+          key = windowStartDay;
+        }
+        const bucket = byDay.get(key);
+        if (bucket) bucket.push(item);
+        else byDay.set(key, [item]);
+      }
+
+      const days = [...byDay.entries()]
+        .sort(([x], [y]) => x.localeCompare(y))
+        .map(([date, items]) => ({
+          date,
+          items: items.sort((x, y) => withinDayKey(x).localeCompare(withinDayKey(y))),
+        }));
+
+      return {
+        now: localNowISO(),
+        timeZone: timeZoneName(),
+        range: { start, end },
+        counts: {
+          events: events.length,
+          dueReminders: dated.length,
+          overdue: overdue.length,
+          undated: undated.length,
+          pairsCollapsed,
+        },
+        truncated: eventsRes.truncated === true || datedRes.truncated === true,
+        overdue,
+        days,
+        ...(a.includeUndated === true ? { undated } : {}),
+      };
     }
 
     case "get_event":

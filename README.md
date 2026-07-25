@@ -184,6 +184,23 @@ onto this codebase.
 | `update_calendar` | Rename / recolor |
 | `delete_calendar` | Delete a calendar and its contents (two-step) |
 
+### Combined
+
+| Tool | Purpose |
+| --- | --- |
+| `list_agenda` | Events and dated reminders in one time-ordered view, grouped by day, plus what is overdue |
+
+Events and reminders are different kinds of object and this does not change that — an event
+occupies a span of time, a reminder is a due point with a completion state, and neither can
+become the other. `list_agenda` merges the *presentation* only: two reads against the one store,
+sorted into a single timeline, each item tagged with its `kind`.
+
+It also collapses mirrored pairs. Stores that get written by an automation often carry the same
+commitment twice, as an event *and* as a reminder with the same title at the same moment; listed
+separately that reads as duplication rather than as one thing to do. A matched pair becomes one
+entry with `alsoAReminder: true` and both ids, so nothing is hidden and either object can still
+be addressed. Pass `collapsePairs: false` for the raw view.
+
 ### Events
 
 | Tool | Purpose |
