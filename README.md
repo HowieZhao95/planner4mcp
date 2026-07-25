@@ -266,3 +266,7 @@ node scripts/smoke.mjs create_reminder '{"title":"test","due":"2026-07-26T09:00"
 
 Bridge methods: `ping`, `access.status`, `access.request`, `sources.list`, `calendars.{list,create,update,delete}`,
 `events.{list,get,create,update,delete,freeTime}`, `reminders.{list,get,create,update,delete,complete}`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

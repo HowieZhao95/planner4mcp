@@ -2,15 +2,21 @@
   "name": "planner4mcp",
   "version": "0.1.0",
   "description": "MCP server for Apple Calendar and Reminders (EventKit), full CRUD",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HowieZhao95/planner4mcp.git"
+  },
   "type": "module",
   "bin": {
     "planner4mcp": "dist/index.js"
   },
   "files": [
     "dist",
-    "build/ekbridge",
+    "bin",
     "swift",
-    "scripts"
+    "scripts",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"
