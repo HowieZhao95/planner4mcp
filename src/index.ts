@@ -18,7 +18,11 @@ Working rules:
 - delete_events, delete_reminders and delete_calendar are two-step. The first call only previews. Show the preview to
   the user in their own words and get an explicit yes before calling again with confirm=true. Deletion is not undoable.
 - To clear a scheduled item the user has finished, prefer complete_reminders over delete_reminders.
-- Calendars with writable=false (subscribed feeds, holidays, birthdays) cannot be modified. Say so rather than retrying.`;
+- Calendars with writable=false (subscribed feeds, holidays, birthdays) cannot be modified. Say so rather than retrying.
+- EventKit does not expose three things the user can see in Reminders.app: list groups (the folder holding several
+  lists), sections within a list, and subtask nesting. Lists and reminders come back flat. Do not infer, invent or
+  promise this structure, and do not try to work around it by writing to hidden fields — there are none. If the user
+  asks for it, say it is unavailable through Apple's API and offer a list-per-section or a title convention instead.`;
 
 async function main(): Promise<void> {
   const bridge = new EventKitBridge();

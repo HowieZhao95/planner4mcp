@@ -206,6 +206,43 @@ onto this codebase.
 | `complete_reminders` | Batch mark done / undone |
 | `delete_reminders` | Batch delete (two-step) |
 
+## What EventKit does not expose
+
+Three things visible in Reminders.app have no representation in EventKit, so this server
+cannot read or write them. This is a limit of Apple's API, not a missing feature here — and it
+is documented in this much detail so nobody has to rediscover it.
+
+**List groups** — the folder that holds several lists (`Work` ▸ *Project A*, *Project B*).
+There is no `EKCalendarGroup`, `EKGroup` or `EKCalendarFolder` class at runtime, and none of
+`EKCalendar`'s twelve properties (`title`, `color`, `source`, `type`, `allowedEntityTypes`, …)
+references a parent. Groups simply do not appear: `list_calendars` returns the member lists
+flattened, with no indication that a group exists.
+
+**Sections inside a list** — the headings that split one list into blocks. They are not
+returned as items at all. On a list showing four section headings and 55 reminders,
+`list_reminders` returns exactly 55, and `EKReminder` has no section-like property among its
+seven (`completed`, `completionDate`, `dueDateComponents`, `dueDateTimeZone`, `parentID`,
+`priority`, `startDateComponents`).
+
+**Subtasks** — this one looks available and is not. `EKReminder.parentID` exists but is typed
+`EKObjectID`, a private class, so it cannot be set from an identifier string. Handing a child
+the parent's own `objectID` does set the property in memory, and the object even reports the
+relationship back — but it does not survive `save()`. The reason shows in the value that comes
+back: `x-apple-eventkit:///Undefined/t8`, an *undefined*, *temporary* object id. EventKit never
+materialises a real identity for third-party callers here, so there is nothing valid to link to.
+An attempt at subtask support was written, tested against live data, and removed rather than
+shipped as a tool that silently does nothing.
+
+Nor are these reachable another way. The Reminders AppleScript dictionary declares only three
+classes — `account`, `list`, `reminder` — with no groups or sections. There is no Reminders
+private framework in `/System/Library/PrivateFrameworks`. The local store under
+`~/Library/Group Containers/group.com.apple.reminders` does contain the structure, but reading
+it needs Full Disk Access and an undocumented schema, and writing to it would fight the iCloud
+sync engine.
+
+If you need this structure to be visible to an agent, model it with something EventKit does
+expose: one list per section, or a title convention such as `[Compliance] …`.
+
 ## Safety model
 
 Deletion is the only thing that cannot be undone, so all three delete tools are **two-step**:

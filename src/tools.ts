@@ -150,7 +150,9 @@ export const TOOLS: ToolDef[] = [
     name: "list_calendars",
     description:
       "List calendars and/or reminder lists, with their ids, colors, owning account, writability, and which one is the default. " +
-      "Every other tool takes these ids. Read-only (subscribed / delegated) calendars are flagged with writable=false.",
+      "Every other tool takes these ids. Read-only (subscribed / delegated) calendars are flagged with writable=false. " +
+      "The result is flat: if the user has organised lists into groups in Reminders.app, EventKit does not report the " +
+      "grouping, so the member lists appear alongside everything else and groups can be neither created nor read.",
     inputSchema: {
       type: "object",
       properties: {
@@ -380,7 +382,10 @@ export const TOOLS: ToolDef[] = [
   {
     name: "list_reminders",
     description:
-      "List reminders, optionally filtered by list, completion state, due-date window, or text.",
+      "List reminders, optionally filtered by list, completion state, due-date window, or text. " +
+      "Returns a flat list: EventKit does not expose the section headings a list may be divided into in " +
+      "Reminders.app, nor subtask nesting, so never claim to the user that a reminder sits in a particular " +
+      "section — that information is not available here.",
     inputSchema: {
       type: "object",
       properties: {
