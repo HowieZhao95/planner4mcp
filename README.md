@@ -79,6 +79,53 @@ Or in a client's JSON config:
 }
 ```
 
+## Using it on another Mac
+
+This server reads the local EventKit store, and that store is what iCloud syncs. So on a second
+Mac signed into the same Apple Account **the data is already the same** — what does not carry
+over is the software and the permission grant.
+
+Requirements on the second machine: macOS 14+ (the binary's deployment target), Xcode or the
+Command Line Tools (for `swiftc`), and Node 18+.
+
+```bash
+git clone <your remote> planner4mcp && cd planner4mcp
+npm install && npm run build
+which node && claude mcp add planner4mcp -- $(which node) $(pwd)/dist/index.js
+```
+
+Copying the directory instead of cloning works too, but delete `node_modules/`, `dist/` and
+`build/` first and rebuild. **The Swift binary does not travel between machines**: the build
+script picks the architecture from `uname -m` (arm64 vs x86_64), and the ad-hoc signature has to
+be re-established for TCC anyway. Note also that the Node path differs — Homebrew is
+`/opt/homebrew/bin/node` on Apple Silicon, `/usr/local/bin/node` on Intel.
+
+**Access has to be granted again.** TCC is a per-machine database; it is not synced by iCloud
+and has nothing to do with the Apple Account. The first call on the new machine re-prompts.
+
+### Two things that bite
+
+**Local calendars do not sync.** Only calendars and reminder lists whose source is iCloud appear
+on other devices. If `create_calendar` is called without `sourceId` it may land in the "On My
+Mac" local account, where nothing else will ever see it. Check `list_accounts` and pass the
+iCloud account's id explicitly. For existing calendars, `list_calendars` reports `source.type` —
+`calDAV` with the title `iCloud` is the synced one.
+
+**Identifiers are device-local.** `calendarIdentifier` and `eventIdentifier` are local to one
+Mac; the same event has different ids on two machines. This is invisible in normal use, because
+every tool call lists first and acts on ids from that same response within one session. It only
+breaks if ids are persisted somewhere or passed between machines — looking up an id on Mac A and
+deleting it on Mac B will fail. EventKit's `calendarItemExternalIdentifier` is the cross-device
+stable one; it is not currently exposed, and would need to be added if that workflow is wanted.
+
+### What will not work
+
+iPhone and iPad cannot run an MCP server at all. Linux and Windows have no EventKit; reaching
+the same data there means talking CalDAV to iCloud directly, which is a separate implementation
+— Apple ID plus an app-specific password for auth, hand-built RFC 5545 for recurrence, and
+noticeably weaker support for reminders. That is worth designing on its own rather than bolting
+onto this codebase.
+
 ---
 
 ## Tools
