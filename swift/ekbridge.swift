@@ -14,6 +14,75 @@ import Foundation
 import EventKit
 import CoreGraphics
 import CoreLocation
+import MachO
+
+// MARK: - TCC responsibility
+//
+// TCC attributes a request to the *responsible process*, which for a spawned
+// child is normally the host app — and it refuses to show a consent dialog if
+// that app's Info.plist lacks the matching usage description. Claude Code
+// (com.anthropic.claude-code) declares microphone, Apple Events and local
+// network, but nothing for Calendars or Reminders, so any EventKit request made
+// under it is silently denied and the status stays "notDetermined" forever.
+//
+// The fix is to disown that inheritance: re-exec ourselves with
+// responsibility_spawnattrs_setdisclaim(), which makes this process its own
+// responsible process. TCC then reads OUR bundle — build/ekbridge.app, whose
+// Info.plist does carry NSCalendarsFullAccessUsageDescription and
+// NSRemindersFullAccessUsageDescription — and can prompt normally.
+//
+// POSIX_SPAWN_SETEXEC makes posix_spawn replace the current process image
+// rather than fork, so the pid and all inherited file descriptors (our stdio
+// pipes to the MCP server) survive untouched.
+//
+// responsibility_spawnattrs_setdisclaim is private API, so it is resolved with
+// dlsym: if a future macOS drops it we degrade to the old behaviour instead of
+// failing to launch.
+
+private let disclaimEnvKey = "EKBRIDGE_DISCLAIMED"
+
+private func selfExecutablePath() -> String? {
+    var size = UInt32(PATH_MAX)
+    var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+    guard _NSGetExecutablePath(&buffer, &size) == 0 else { return nil }
+    var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
+    if realpath(buffer, &resolved) != nil { return String(cString: resolved) }
+    return String(cString: buffer)
+}
+
+/// Re-exec self as its own TCC responsible process. Returns only on failure.
+func reexecDisclaimingResponsibility() {
+    if ProcessInfo.processInfo.environment[disclaimEnvKey] != nil { return }
+    guard let exePath = selfExecutablePath() else { return }
+
+    typealias SetDisclaim = @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
+    let RTLD_DEFAULT = UnsafeMutableRawPointer(bitPattern: -2)
+    guard let symbol = dlsym(RTLD_DEFAULT, "responsibility_spawnattrs_setdisclaim") else { return }
+    let setDisclaim = unsafeBitCast(symbol, to: SetDisclaim.self)
+
+    var attr: posix_spawnattr_t?
+    guard posix_spawnattr_init(&attr) == 0 else { return }
+    defer { posix_spawnattr_destroy(&attr) }
+    guard setDisclaim(&attr, 1) == 0 else { return }
+    guard posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETEXEC)) == 0 else { return }
+
+    var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) }
+    argv.append(nil)
+
+    var environment = ProcessInfo.processInfo.environment
+    environment[disclaimEnvKey] = "1"
+    var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
+    envp.append(nil)
+
+    defer {
+        for p in argv where p != nil { free(p) }
+        for p in envp where p != nil { free(p) }
+    }
+
+    var pid: pid_t = 0
+    // With SETEXEC this does not return on success.
+    _ = posix_spawn(&pid, exePath, nil, &attr, &argv, &envp)
+}
 
 // MARK: - Errors
 
@@ -1296,6 +1365,9 @@ func errorPayload(_ error: Error) -> [String: Any] {
 @main
 struct EKBridgeMain {
     static func main() {
+        // Must happen before anything touches EventKit.
+        reexecDisclaimingResponsibility()
+
         setvbuf(stdout, nil, _IOLBF, 0)
         let args = Array(CommandLine.arguments.dropFirst())
         let bridge = Bridge()

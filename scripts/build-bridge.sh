@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
-# Build the Swift EventKit bridge binary.
+# Build the Swift EventKit bridge.
 #
-# The Info.plist is embedded into the __TEXT,__info_plist section — without it
-# macOS kills the process the moment it touches EventKit (no usage description).
-# The binary is then ad-hoc signed with a stable identifier so TCC can remember
-# the grant across rebuilds.
+# The output is an .app bundle, not a bare executable, and that is load-bearing:
+# some hosts (Claude among them) spawn child processes through a "disclaimer"
+# helper that calls responsibility_spawnattrs_setdisclaim(), so the child becomes
+# its OWN TCC responsible process instead of inheriting the host's identity.
+# tccd will only show a consent dialog for a process it can resolve to a real
+# bundle — a bare Mach-O gets silently denied and the status stays notDetermined.
+#
+# The Info.plist is also embedded into __TEXT,__info_plist so the binary still
+# works when invoked directly, and the bundle is ad-hoc signed with a stable
+# identifier so TCC remembers the grant across rebuilds.
+#
+# build/ekbridge is a symlink to the executable inside the bundle; running it
+# resolves to the real path, so it keeps the bundle identity either way.
 
 set -euo pipefail
 
@@ -12,7 +21,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/swift/ekbridge.swift"
 PLIST="$ROOT/swift/Info.plist"
 OUT_DIR="$ROOT/build"
-OUT="$OUT_DIR/ekbridge"
+APP="$OUT_DIR/ekbridge.app"
+EXEC="$APP/Contents/MacOS/ekbridge"
+BUNDLE_ID="com.howiez.planner4mcp.ekbridge"
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -21,23 +32,28 @@ case "$ARCH" in
   *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-mkdir -p "$OUT_DIR"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS"
 
 echo "==> Compiling ekbridge ($TARGET)"
 swiftc -O -parse-as-library \
   -target "$TARGET" \
   -framework EventKit -framework CoreLocation -framework CoreGraphics \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST" \
-  -o "$OUT" "$SRC"
+  -o "$EXEC" "$SRC"
 
-echo "==> Ad-hoc signing"
-codesign --force --sign - \
-  --identifier com.howiez.planner4mcp.ekbridge \
-  "$OUT"
+echo "==> Assembling bundle"
+cp "$PLIST" "$APP/Contents/Info.plist"
+printf 'APPL????' > "$APP/Contents/PkgInfo"
+ln -sfn "ekbridge.app/Contents/MacOS/ekbridge" "$OUT_DIR/ekbridge"
 
-echo "==> Verifying embedded Info.plist"
-if ! otool -s __TEXT __info_plist "$OUT" >/dev/null 2>&1; then
-  echo "WARNING: could not verify __info_plist section" >&2
-fi
+echo "==> Ad-hoc signing bundle"
+codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+codesign --verify --deep --strict "$APP"
 
-echo "==> Built $OUT"
+echo "==> Registering with LaunchServices"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+[ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$APP" || true
+
+echo "==> Built $APP"
+echo "    symlink: $OUT_DIR/ekbridge"

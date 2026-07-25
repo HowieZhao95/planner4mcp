@@ -33,15 +33,22 @@ function locateBinary(): string {
     return fromEnv;
   }
   const here = dirname(fileURLToPath(import.meta.url));
-  // dist/bridge.js -> ../build/ekbridge ; src/bridge.ts -> ../build/ekbridge
-  const candidate = resolve(here, "..", "build", "ekbridge");
-  if (!existsSync(candidate)) {
+  const buildDir = resolve(here, "..", "build");
+  // Prefer the executable inside the .app bundle: hosts that disclaim TCC
+  // responsibility for their children make this process its own responsible
+  // process, and tccd only prompts for something it can resolve to a bundle.
+  const candidates = [
+    resolve(buildDir, "ekbridge.app", "Contents", "MacOS", "ekbridge"),
+    resolve(buildDir, "ekbridge"),
+  ];
+  const found = candidates.find((p) => existsSync(p));
+  if (!found) {
     throw new BridgeError(
       "bridge_missing",
-      `EventKit bridge binary not found at '${candidate}'. Run: npm run build:bridge`,
+      `EventKit bridge not found at '${candidates[0]}'. Run: npm run build:bridge`,
     );
   }
-  return candidate;
+  return found;
 }
 
 /**

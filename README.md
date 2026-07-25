@@ -26,39 +26,56 @@ large lists) and cannot express recurrence rules, alarms, or priorities. EventKi
 npm install && npm run build
 ```
 
-This compiles `swift/ekbridge.swift` into `build/ekbridge` and the TypeScript into `dist/`.
-
-The build embeds `swift/Info.plist` into the binary's `__TEXT,__info_plist` section. Without
-that section macOS kills the process the instant it touches EventKit, because there is no usage
-description string. The binary is then ad-hoc signed with a stable identifier so TCC can
-remember the grant across rebuilds.
+This compiles `swift/ekbridge.swift` into an **app bundle**, `build/ekbridge.app`, with
+`build/ekbridge` left as a symlink to the executable inside it. The TypeScript goes to `dist/`.
 
 ## Granting access (do this once)
 
-macOS gates Calendars and Reminders behind TCC. **The grant attaches to the app that launches
-the server, not to the binary itself** — a command-line tool inherits its parent's TCC identity.
-So:
-
-- Using it from **Claude Code / Claude Desktop** → the prompt appears for *Claude*, and the
-  grant shows up under that app in System Settings.
-- Using it from a **terminal** → the grant shows up under *Terminal* / *iTerm*.
-
-To trigger the prompts yourself, run this in a normal Terminal window (not through a tool, or
-the dialog has no GUI session to appear in and is silently denied):
-
 ```bash
-cd /Users/howiez/dev-Loc/Project/planner4mcp && ./build/ekbridge --request-access
+./build/ekbridge --request-access   # prompts
+./build/ekbridge access.status      # never prompts, just reports
 ```
 
-Check the state at any time — this never prompts:
+Both should end up `fullAccess`. The grant is recorded against this project's own bundle
+identifier, `com.howiez.planner4mcp.ekbridge`, and appears in **System Settings › Privacy &
+Security › Calendars** (and **› Reminders**) as *planner4mcp*.
+
+### Why this is not as simple as it looks
+
+macOS attributes a TCC request to the **responsible process**, which for a spawned child is
+normally the host app — and `tccd` refuses to display a consent dialog if that app's `Info.plist`
+does not carry the matching usage description. It does not error; it silently denies and leaves
+the status at `notDetermined` forever.
+
+Claude Code (`com.anthropic.claude-code`) declares usage strings for the microphone, Apple
+Events and the local network — nothing for Calendars or Reminders. Claude Desktop is the same.
+So an EventKit request made under either of them can never succeed, no matter what the child
+binary declares. Terminals do not have this problem: they carry no calendar usage string either,
+but the user can grant *Terminal* itself access in System Settings, and the child inherits it.
+
+Three things in the build exist specifically to get around this, and removing any of them breaks
+access in a way that looks like a permissions mistake rather than a bug:
+
+1. **`swift/Info.plist` is embedded into `__TEXT,__info_plist`.** Without the usage description
+   strings the kernel kills the process the instant it touches EventKit.
+2. **The output is an `.app` bundle, not a bare executable.** `tccd` only prompts for a process
+   it can resolve to a real bundle with an identifier and a display name.
+3. **The binary re-execs itself with `responsibility_spawnattrs_setdisclaim()`** before touching
+   EventKit (see `reexecDisclaimingResponsibility` in `swift/ekbridge.swift`). That is what
+   severs the inherited attribution and makes the process its own responsible process, so TCC
+   reads *this* bundle's usage strings instead of the host's. `POSIX_SPAWN_SETEXEC` replaces the
+   process image rather than forking, so the pid and the inherited stdio pipes survive intact.
+   The symbol is private API, resolved via `dlsym` so that a future macOS dropping it degrades
+   to the old behaviour instead of failing to launch.
+
+The bundle is ad-hoc signed with a stable `--identifier`. Note that ad-hoc signatures are pinned
+by cdhash, so **rebuilding the Swift can re-trigger the consent prompt**. To wipe the grant and
+start over:
 
 ```bash
-./build/ekbridge access.status
+tccutil reset Calendar com.howiez.planner4mcp.ekbridge
+tccutil reset Reminders com.howiez.planner4mcp.ekbridge
 ```
-
-`notDetermined` means no prompt has been answered yet. `denied` means you have to flip it
-manually in **System Settings › Privacy & Security › Calendars** (and **› Reminders**) for the
-host app, then restart that app.
 
 ## Registering with Claude Code
 
@@ -101,7 +118,8 @@ be re-established for TCC anyway. Note also that the Node path differs — Homeb
 `/opt/homebrew/bin/node` on Apple Silicon, `/usr/local/bin/node` on Intel.
 
 **Access has to be granted again.** TCC is a per-machine database; it is not synced by iCloud
-and has nothing to do with the Apple Account. The first call on the new machine re-prompts.
+and has nothing to do with the Apple Account. Run `./build/ekbridge --request-access` once on
+the new machine.
 
 ### Two things that bite
 
