@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const proc = spawn("node", [resolve(root, "dist", "index.js")], {
@@ -45,11 +46,19 @@ function notify(method, params) {
 }
 
 const init = await rpc("initialize", {
-  protocolVersion: "2024-11-05",
+  protocolVersion: LATEST_PROTOCOL_VERSION,
   capabilities: {},
   clientInfo: { name: "smoke", version: "0" },
 });
-console.log("initialize:", JSON.stringify(init.result?.serverInfo));
+const negotiated = init.result?.protocolVersion;
+console.log("initialize:", JSON.stringify(init.result?.serverInfo), "protocol:", negotiated);
+if (negotiated !== LATEST_PROTOCOL_VERSION) {
+  console.error(
+    `protocolVersion mismatch: server=${negotiated} sdk=${LATEST_PROTOCOL_VERSION}`,
+  );
+  proc.kill();
+  process.exit(1);
+}
 notify("notifications/initialized", {});
 
 const list = await rpc("tools/list", {});
