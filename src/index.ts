@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -7,6 +10,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { EventKitBridge, BridgeError } from "./bridge.js";
 import { TOOLS, callTool } from "./tools.js";
+
+function packageVersion(): string {
+  const pkgPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+  return pkg.version ?? "0.0.0";
+}
 
 const INSTRUCTIONS = `Read and write the user's Apple Calendar and Reminders on this Mac, via EventKit.
 
@@ -17,7 +26,8 @@ Working rules:
 - Events and reminders are different kinds of object and stay that way: an event occupies a span of time, a reminder
   is a due point with a completion state. They live in one store but cannot be converted into each other, and a
   reminder has no end time. Do not describe them to the user as two systems that need syncing.
-- Ids are opaque. Always resolve names to ids with list_calendars / list_events / list_reminders before editing or deleting.
+- Ids are opaque and local to this Mac. Always resolve names to ids with list_calendars / list_events / list_reminders before editing or deleting.
+- \`externalId\` is EventKit's calendarItemExternalIdentifier. For iCloud and CalDAV it is the same item on another device. It is not a substitute for \`id\`: mutations still take \`id\`, a repeating event shares one externalId across occurrences (pass occurrenceDate), local calendars just echo the local id, and Exchange ids differ between iOS and macOS and between devices for reminders. It can be absent on an item that is not in a calendar yet.
 - Dates accept ISO-8601 with offset, local wall-clock without offset, or date-only (which means all-day / no time).
 - Recurring events are returned as individual occurrences. To change or delete just one, pass its occurrenceDate;
   to change it and everything after, also pass span="future".
@@ -34,7 +44,7 @@ async function main(): Promise<void> {
   const bridge = new EventKitBridge();
 
   const server = new Server(
-    { name: "planner4mcp", version: "0.1.0" },
+    { name: "planner4mcp", version: packageVersion() },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
 

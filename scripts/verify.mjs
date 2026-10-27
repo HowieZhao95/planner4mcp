@@ -8,8 +8,10 @@
 //   /opt/homebrew/bin/node scripts/verify.mjs
 
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PREFIX = "planner4mcp selftest";
@@ -101,17 +103,115 @@ function dayOffset(days) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+function parseYmd(s) {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function addDays(ymd, n) {
+  const d = parseYmd(ymd);
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Inclusive start, exclusive end, as `yyyy-MM-dd` strings. */
+function daysInRange(start, endExclusive) {
+  const out = [];
+  let cur = start;
+  while (cur < endExclusive) {
+    out.push(cur);
+    cur = addDays(cur, 1);
+  }
+  return out;
+}
+
+function isWeekday(ymd) {
+  const wd = parseYmd(ymd).getDay();
+  return wd !== 0 && wd !== 6;
+}
+
+function offsetForWeekday(targetDow, minOffset) {
+  let o = minOffset;
+  while (parseYmd(dayOffset(o)).getDay() !== targetDow) o += 1;
+  return o;
+}
+
 // ---------------------------------------------------------------- the run
 
-const created = { events: [], reminders: [], lists: [] };
+const created = { events: [], reminders: [], lists: [], eventCalendars: [] };
 
 async function run() {
-  await rpc("initialize", {
-    protocolVersion: "2024-11-05",
+  const init = await rpc("initialize", {
+    protocolVersion: LATEST_PROTOCOL_VERSION,
     capabilities: {},
     clientInfo: { name: "verify", version: "0" },
   });
   proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
+  check(
+    "negotiated protocolVersion matches the SDK",
+    init.result?.protocolVersion === LATEST_PROTOCOL_VERSION,
+    `server=${init.result?.protocolVersion} sdk=${LATEST_PROTOCOL_VERSION}`,
+  );
+  const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+  check(
+    "server version matches package.json",
+    init.result?.serverInfo?.version === pkg.version,
+    `server=${init.result?.serverInfo?.version} package=${pkg.version}`,
+  );
+
+  const listedTools = await rpc("tools/list", {});
+  const byName = Object.fromEntries((listedTools.result?.tools ?? []).map((t) => [t.name, t]));
+  const readOnlyTools = [
+    "check_access",
+    "list_accounts",
+    "list_calendars",
+    "list_events",
+    "get_event",
+    "find_free_time",
+    "list_agenda",
+    "list_reminders",
+    "get_reminder",
+  ];
+  for (const name of readOnlyTools) {
+    const ann = byName[name]?.annotations;
+    check(
+      `${name} is annotated read-only`,
+      ann?.readOnlyHint === true && ann?.destructiveHint === false && ann?.idempotentHint === true,
+      JSON.stringify(ann),
+    );
+  }
+  for (const name of ["delete_calendar", "delete_events", "delete_reminders"]) {
+    const ann = byName[name]?.annotations;
+    check(
+      `${name} is annotated destructive`,
+      ann?.readOnlyHint === false && ann?.destructiveHint === true && ann?.idempotentHint === false,
+      JSON.stringify(ann),
+    );
+  }
+  for (const name of ["create_calendar", "create_event", "create_reminder"]) {
+    const ann = byName[name]?.annotations;
+    check(
+      `${name} is annotated as a non-idempotent create`,
+      ann?.readOnlyHint === false && ann?.destructiveHint === false && ann?.idempotentHint === false,
+      JSON.stringify(ann),
+    );
+  }
+  for (const name of ["update_calendar", "update_event", "update_reminder"]) {
+    const ann = byName[name]?.annotations;
+    check(
+      `${name} is annotated as an idempotent update`,
+      ann?.readOnlyHint === false && ann?.destructiveHint === false && ann?.idempotentHint === true,
+      JSON.stringify(ann),
+    );
+  }
+  {
+    const ann = byName.complete_reminders?.annotations;
+    check(
+      "complete_reminders is destructive and not idempotent",
+      ann?.readOnlyHint === false && ann?.destructiveHint === true && ann?.idempotentHint === false,
+      JSON.stringify(ann),
+    );
+  }
 
   // ---- access
   section("Access");
@@ -152,6 +252,8 @@ async function run() {
   created.lists.push(newList.id);
   check("create_calendar returns an id", !!newList.id);
   check("create_calendar applied the color", newList.color === "#FF8800", `got ${newList.color}`);
+  check("create_calendar returns entity", newList.entity === "reminder", `got ${newList.entity}`);
+  check("create_calendar returns isDefault", newList.isDefault === false, `got ${newList.isDefault}`);
 
   const renamed = await must("update_calendar", {
     entity: "reminder",
@@ -159,6 +261,8 @@ async function run() {
     title: `${PREFIX} list renamed`,
   });
   check("update_calendar renamed it", renamed.title === `${PREFIX} list renamed`, `got ${renamed.title}`);
+  check("update_calendar returns entity", renamed.entity === "reminder", `got ${renamed.entity}`);
+  check("update_calendar returns isDefault", renamed.isDefault === false, `got ${renamed.isDefault}`);
 
   const calPreview = await must("delete_calendar", { entity: "reminder", id: newList.id });
   check("delete_calendar without confirm is a dry run", calPreview.dryRun === true);
@@ -174,7 +278,26 @@ async function run() {
     "confirmed delete removed the list",
     !afterDelete.calendars.some((c) => c.id === newList.id),
   );
-  created.lists = [];
+  created.lists = created.lists.filter((id) => id !== newList.id);
+
+  // Everything below writes only into these throwaway calendars, never the
+  // user's default calendar or reminder list.
+  section("Isolated fixtures");
+  const testCal = await must("create_calendar", {
+    entity: "event",
+    title: `${PREFIX} calendar`,
+  });
+  created.eventCalendars.push(testCal.id);
+  const testList = await must("create_calendar", {
+    entity: "reminder",
+    title: `${PREFIX} reminders`,
+  });
+  created.lists.push(testList.id);
+  check("isolated event calendar created", !!testCal.id);
+  check("isolated reminder list created", !!testList.id);
+  check("event calendar payload includes entity", testCal.entity === "event", `got ${testCal.entity}`);
+  check("event calendar payload includes isDefault", testCal.isDefault === false, `got ${testCal.isDefault}`);
+  console.log(`  fixtures: calendar ${testCal.id} list ${testList.id}`);
 
   // ---- simple event
   section("Events — create / read / update");
@@ -182,13 +305,14 @@ async function run() {
     title: `${PREFIX} meeting`,
     start: `${dayOffset(1)}T10:00`,
     end: `${dayOffset(1)}T11:00`,
-    calendarId: defaultCal.id,
+    calendarId: testCal.id,
     notes: "created by verify.mjs",
     location: "Room A",
     alarms: [{ relativeOffsetMinutes: -15 }],
   });
   created.events.push(evt.id);
   check("create_event returns an id", !!evt.id);
+  check("event exposes externalId", typeof evt.externalId === "string" && evt.externalId.length > 0, String(evt.externalId));
   check("event start is 10:00", (evt.start ?? "").includes("T10:00"), `got ${evt.start}`);
   check("event is not all-day", evt.allDay === false);
   check("notes round-tripped", evt.notes === "created by verify.mjs");
@@ -197,6 +321,7 @@ async function run() {
 
   const fetched = await must("get_event", { id: evt.id });
   check("get_event returns the same event", fetched.id === evt.id && fetched.title === evt.title);
+  check("get_event returns externalId", fetched.externalId === evt.externalId, String(fetched.externalId));
 
   const moved = await must("update_event", {
     id: evt.id,
@@ -210,15 +335,24 @@ async function run() {
   check("update_event cleared the location", !moved.location, `got ${moved.location}`);
   check("update_event left notes alone", moved.notes === "created by verify.mjs");
 
-  const listed = await must("list_events", { start: dayOffset(0), end: dayOffset(3) });
+  const listed = await must("list_events", {
+    start: dayOffset(0),
+    end: dayOffset(3),
+    calendarIds: [testCal.id],
+  });
   check(
     "list_events finds it",
     listed.events.some((e) => e.id === evt.id),
     `${listed.total} events in window`,
   );
+  check(
+    "list_events returns externalId",
+    listed.events.find((e) => e.id === evt.id)?.externalId === evt.externalId,
+  );
   const searched = await must("list_events", {
     start: dayOffset(0),
     end: dayOffset(3),
+    calendarIds: [testCal.id],
     query: "selftest meeting moved",
   });
   check("list_events query filter works", searched.events.length === 1, `got ${searched.events.length}`);
@@ -228,7 +362,7 @@ async function run() {
   const allDay = await must("create_event", {
     title: `${PREFIX} allday`,
     start: dayOffset(2),
-    calendarId: defaultCal.id,
+    calendarId: testCal.id,
   });
   created.events.push(allDay.id);
   check("date-only start implies all-day", allDay.allDay === true);
@@ -240,7 +374,7 @@ async function run() {
     title: `${PREFIX} weekly`,
     start: `${dayOffset(1)}T09:00`,
     durationMinutes: 30,
-    calendarId: defaultCal.id,
+    calendarId: testCal.id,
     recurrence: { frequency: "weekly", interval: 1, end: { occurrenceCount: 4 } },
   });
   created.events.push(rec.id);
@@ -248,7 +382,7 @@ async function run() {
   check("recurrence frequency stored", rec.recurrence?.[0]?.frequency === "weekly", JSON.stringify(rec.recurrence));
   check("recurrence count stored", rec.recurrence?.[0]?.end?.occurrenceCount === 4);
 
-  const expanded = await must("list_events", { start: dayOffset(0), end: dayOffset(30) });
+  const expanded = await must("list_events", { start: dayOffset(0), end: dayOffset(30), calendarIds: [testCal.id] });
   const occurrences = expanded.events.filter((e) => e.title === `${PREFIX} weekly`);
   check("recurring event expands into 4 occurrences", occurrences.length === 4, `got ${occurrences.length}`);
   check("each occurrence carries occurrenceDate", occurrences.every((o) => !!o.occurrenceDate));
@@ -262,7 +396,7 @@ async function run() {
     title: `${PREFIX} weekly detached`,
   });
   check("single-occurrence edit succeeded", detached.title === `${PREFIX} weekly detached`);
-  const afterDetach = await must("list_events", { start: dayOffset(0), end: dayOffset(30) });
+  const afterDetach = await must("list_events", { start: dayOffset(0), end: dayOffset(30), calendarIds: [testCal.id] });
   const stillWeekly = afterDetach.events.filter((e) => e.title === `${PREFIX} weekly`);
   const detachedOnes = afterDetach.events.filter((e) => e.title === `${PREFIX} weekly detached`);
   check("only that occurrence changed", stillWeekly.length === 3 && detachedOnes.length === 1,
@@ -282,7 +416,7 @@ async function run() {
   section("Reminders — create / read / update");
   const rem = await must("create_reminder", {
     title: `${PREFIX} task`,
-    listId: defaultList.id,
+    listId: testList.id,
     due: `${dayOffset(1)}T09:00`,
     notes: "verify.mjs",
     priority: "high",
@@ -290,6 +424,11 @@ async function run() {
   });
   created.reminders.push(rem.id);
   check("create_reminder returns an id", !!rem.id);
+  check(
+    "reminder exposes externalId",
+    typeof rem.externalId === "string" && rem.externalId.length > 0,
+    String(rem.externalId),
+  );
   check("due date has a time", rem.due?.hasTime === true, JSON.stringify(rem.due));
   check("due time is 09:00", (rem.due?.dateTime ?? "").includes("T09:00"), rem.due?.dateTime);
   check("priority high stored as 1", rem.priority === 1 && rem.priorityLabel === "high", `got ${rem.priority}`);
@@ -307,18 +446,18 @@ async function run() {
   // date-only due
   const rem2 = await must("create_reminder", {
     title: `${PREFIX} task dateonly`,
-    listId: defaultList.id,
+    listId: testList.id,
     due: dayOffset(3),
   });
   created.reminders.push(rem2.id);
   check("date-only due has no time", rem2.due?.hasTime === false && rem2.due?.date === dayOffset(3),
     JSON.stringify(rem2.due));
 
-  const remList = await must("list_reminders", { listIds: [defaultList.id], query: "selftest task" });
+  const remList = await must("list_reminders", { listIds: [testList.id], query: "selftest task" });
   check("list_reminders finds both", remList.reminders.length === 2, `got ${remList.reminders.length}`);
 
   const dueWindow = await must("list_reminders", {
-    listIds: [defaultList.id],
+    listIds: [testList.id],
     query: "selftest",
     dueStart: dayOffset(0),
     dueEnd: dayOffset(2),
@@ -328,7 +467,7 @@ async function run() {
   section("Reminders — completion");
   const done = await must("complete_reminders", { ids: [rem.id] });
   check("complete_reminders marked it done", done.reminders?.[0]?.completed === true);
-  const stillHidden = await must("list_reminders", { listIds: [defaultList.id], query: "selftest task", status: "incomplete" });
+  const stillHidden = await must("list_reminders", { listIds: [testList.id], query: "selftest task", status: "incomplete" });
   check("completed reminder drops out of incomplete list", stillHidden.reminders.length === 1);
   const undone = await must("complete_reminders", { ids: [rem.id], completed: false });
   check("complete_reminders can undo", undone.reminders?.[0]?.completed === false);
@@ -359,7 +498,7 @@ async function run() {
 
   // ---- recurring delete with span
   section("Delete — recurring span");
-  const remaining = await must("list_events", { start: dayOffset(0), end: dayOffset(30) });
+  const remaining = await must("list_events", { start: dayOffset(0), end: dayOffset(30), calendarIds: [testCal.id] });
   const weeklyLeft = remaining.events.filter((e) => e.title === `${PREFIX} weekly`);
   const target = weeklyLeft[weeklyLeft.length - 1];
   await must("delete_events", {
@@ -368,10 +507,200 @@ async function run() {
     span: "thisEvent",
     confirm: true,
   });
-  const afterOne = await must("list_events", { start: dayOffset(0), end: dayOffset(30) });
+  const afterOne = await must("list_events", { start: dayOffset(0), end: dayOffset(30), calendarIds: [testCal.id] });
   check(
     "span=thisEvent removed exactly one occurrence",
     afterOne.events.filter((e) => e.title === `${PREFIX} weekly`).length === weeklyLeft.length - 1,
+  );
+
+  // ---- all-day events must not wipe a free-time search unless asked
+  section("Free time — multi-day all-day");
+  const freeCal = await must("create_calendar", {
+    entity: "event",
+    title: `${PREFIX} freetime`,
+  });
+  created.eventCalendars.push(freeCal.id);
+  const mondayOff = offsetForWeekday(1, 40);
+  const spanStart = dayOffset(mondayOff);
+  const spanEnd = dayOffset(mondayOff + 3);
+  const multi = await must("create_event", {
+    title: `${PREFIX} multiday allday`,
+    start: spanStart,
+    end: spanEnd,
+    allDay: true,
+    calendarId: freeCal.id,
+  });
+  created.events.push(multi.id);
+  const coveredWeekdays = daysInRange(multi.start, multi.end).filter(isWeekday);
+  check(
+    "multi-day all-day covers several weekdays",
+    coveredWeekdays.length >= 2,
+    `start=${multi.start} end=${multi.end} days=${coveredWeekdays.join(",")}`,
+  );
+  const open = await must("find_free_time", {
+    start: multi.start,
+    end: multi.end,
+    durationMinutes: 60,
+    calendarIds: [freeCal.id],
+    weekdaysOnly: true,
+  });
+  check(
+    "all-day events leave free slots by default",
+    coveredWeekdays.length > 0 &&
+      coveredWeekdays.every((day) => open.slots.some((s) => String(s.start).startsWith(day))),
+    `busyBlocks=${open.busyBlocks} slots=${JSON.stringify(open.slots)}`,
+  );
+  check(
+    "default search does not count the all-day event as busy",
+    open.busyBlocks === 0,
+    `busyBlocks=${open.busyBlocks}`,
+  );
+  const blocked = await must("find_free_time", {
+    start: multi.start,
+    end: multi.end,
+    durationMinutes: 60,
+    calendarIds: [freeCal.id],
+    weekdaysOnly: true,
+    allDayIsBusy: true,
+  });
+  check(
+    "allDayIsBusy removes free slots on the covered weekdays",
+    coveredWeekdays.every((day) => !blocked.slots.some((s) => String(s.start).startsWith(day))),
+    `slots=${JSON.stringify(blocked.slots)}`,
+  );
+  check(
+    "allDayIsBusy counts the all-day span as busy",
+    blocked.busyBlocks >= 1,
+    `busyBlocks=${blocked.busyBlocks}`,
+  );
+
+  section("Agenda");
+  const agendaCal = await must("create_calendar", {
+    entity: "event",
+    title: `${PREFIX} agenda cal`,
+  });
+  created.eventCalendars.push(agendaCal.id);
+  const agendaList = await must("create_calendar", {
+    entity: "reminder",
+    title: `${PREFIX} agenda list`,
+  });
+  created.lists.push(agendaList.id);
+
+  const pairTitle = `${PREFIX} agenda pair`;
+  const pairDay = dayOffset(1);
+  const agendaEvent = await must("create_event", {
+    title: pairTitle,
+    start: `${pairDay}T10:00`,
+    end: `${pairDay}T11:00`,
+    calendarId: agendaCal.id,
+  });
+  created.events.push(agendaEvent.id);
+  const agendaRem = await must("create_reminder", {
+    title: pairTitle,
+    listId: agendaList.id,
+    due: `${pairDay}T10:00`,
+  });
+  created.reminders.push(agendaRem.id);
+  const solo = await must("create_reminder", {
+    title: `${PREFIX} agenda solo`,
+    listId: agendaList.id,
+    due: `${pairDay}T16:00`,
+  });
+  created.reminders.push(solo.id);
+  const later = await must("create_event", {
+    title: `${PREFIX} agenda later`,
+    start: `${dayOffset(2)}T09:30`,
+    durationMinutes: 30,
+    calendarId: agendaCal.id,
+  });
+  created.events.push(later.id);
+  const agendaAllDay = await must("create_event", {
+    title: `${PREFIX} agenda allday`,
+    start: pairDay,
+    calendarId: agendaCal.id,
+  });
+  created.events.push(agendaAllDay.id);
+  const overdue = await must("create_reminder", {
+    title: `${PREFIX} agenda overdue`,
+    listId: agendaList.id,
+    due: `${dayOffset(-2)}T08:00`,
+  });
+  created.reminders.push(overdue.id);
+
+  const agendaArgs = {
+    start: pairDay,
+    end: dayOffset(4),
+    calendarIds: [agendaCal.id],
+    listIds: [agendaList.id],
+  };
+  const agenda = await must("list_agenda", agendaArgs);
+  const day1 = agenda.days.find((d) => d.date === pairDay);
+  const day2 = agenda.days.find((d) => d.date === dayOffset(2));
+  check("agenda groups items onto their days", !!day1 && !!day2, JSON.stringify(agenda.days?.map((d) => d.date)));
+  check(
+    "agenda day keys are sorted",
+    agenda.days.every((d, i, arr) => i === 0 || arr[i - 1].date < d.date),
+  );
+  check(
+    "all-day entry sorts ahead of timed ones",
+    day1?.items?.[0]?.allDay === true && String(day1.items[0].title).includes("agenda allday"),
+    JSON.stringify(day1?.items?.map((i) => i.title)),
+  );
+  const pair = day1?.items?.find((i) => i.title === pairTitle);
+  const pairIdx = day1?.items?.findIndex((i) => i.title === pairTitle) ?? -1;
+  const soloIdx = day1?.items?.findIndex((i) => i.id === solo.id) ?? -1;
+  check(
+    "collapsePairs merges the mirrored event and reminder",
+    pair?.kind === "event" && pair?.alsoAReminder === true && pair?.reminderId === agendaRem.id,
+    JSON.stringify(pair),
+  );
+  check(
+    "agenda keeps both external ids on a collapsed pair",
+    pair?.externalId === agendaEvent.externalId && pair?.reminderExternalId === agendaRem.externalId,
+    JSON.stringify({ event: pair?.externalId, reminder: pair?.reminderExternalId }),
+  );
+  check(
+    "agenda reminder carries externalId",
+    day1?.items?.find((i) => i.id === solo.id)?.externalId === solo.externalId,
+  );
+  check(
+    "timed items sort by time within the day",
+    pairIdx >= 0 && soloIdx > pairIdx,
+    `pair=${pairIdx} solo=${soloIdx}`,
+  );
+  check(
+    "unpaired reminder stays on the same day",
+    day1?.items?.some((i) => i.kind === "reminder" && i.id === solo.id),
+  );
+  check(
+    "collapsed day does not list the pair twice",
+    day1?.items?.filter((i) => i.title === pairTitle).length === 1,
+  );
+  check("pairsCollapsed counts the merge", agenda.counts?.pairsCollapsed === 1, JSON.stringify(agenda.counts));
+  check(
+    "overdue reminder is reported separately",
+    agenda.overdue?.some((i) => i.id === overdue.id),
+    JSON.stringify(agenda.overdue),
+  );
+  check(
+    "overdue reminder is not also filed under a day",
+    !agenda.days.some((d) => d.items.some((i) => i.id === overdue.id)),
+  );
+
+  const raw = await must("list_agenda", { ...agendaArgs, collapsePairs: false });
+  const rawDay = raw.days.find((d) => d.date === pairDay);
+  check(
+    "collapsePairs false keeps the event and the reminder",
+    rawDay?.items?.filter((i) => i.title === pairTitle).length === 2,
+    JSON.stringify(rawDay?.items?.map((i) => ({ kind: i.kind, title: i.title }))),
+  );
+  check("pairsCollapsed is zero when collapsing is off", raw.counts?.pairsCollapsed === 0, JSON.stringify(raw.counts));
+
+  const noOver = await must("list_agenda", { ...agendaArgs, includeOverdue: false });
+  check(
+    "includeOverdue false omits the overdue reminder",
+    !noOver.overdue?.some((i) => i.id === overdue.id),
+    JSON.stringify(noOver.overdue),
   );
 
   // ---- read-only rejection
@@ -417,11 +746,27 @@ async function cleanup() {
   } catch (e) {
     console.log(`  reminder cleanup failed: ${e.message}`);
   }
-  for (const id of created.lists) {
-    try {
-      await must("delete_calendar", { entity: "reminder", id, confirm: true });
-      console.log("  removed leftover test list");
-    } catch { /* already gone */ }
+  try {
+    const all = await must("list_calendars", { entity: "all" });
+    const mine = all.calendars.filter((c) => (c.title ?? "").startsWith(PREFIX));
+    for (const c of mine) {
+      await must("delete_calendar", { entity: c.entity, id: c.id, confirm: true });
+      console.log(`  removed test ${c.entity} "${c.title}"`);
+    }
+  } catch (e) {
+    console.log(`  calendar sweep failed: ${e.message}`);
+    for (const id of created.lists) {
+      try {
+        await must("delete_calendar", { entity: "reminder", id, confirm: true });
+        console.log("  removed leftover test list");
+      } catch { /* already gone */ }
+    }
+    for (const id of created.eventCalendars) {
+      try {
+        await must("delete_calendar", { entity: "event", id, confirm: true });
+        console.log("  removed leftover test calendar");
+      } catch { /* already gone */ }
+    }
   }
 }
 
