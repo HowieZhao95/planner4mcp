@@ -22,7 +22,11 @@ large lists) and cannot express recurrence rules, alarms, or priorities. EventKi
 
 ## Build
 
+This repo is the install. `planner4mcp` is not published to npm, so clone it rather than `npm install -g`. Changing `package.json` `"version"` does not create a git tag or a GitHub Release — that step is left for a person.
+
 ```bash
+git clone https://github.com/HowieZhao95/planner4mcp.git
+cd planner4mcp
 npm install && npm run build
 ```
 
@@ -99,6 +103,26 @@ claude mcp add planner4mcp -- /path/to/planner4mcp/bin/planner4mcp
 `scripts/register-desktop.sh` writes that entry into Claude Desktop's config for you. It backs
 the file up first and leaves any other servers alone.
 
+### Cursor
+
+Cursor reads the same `mcpServers` shape. Use an absolute path to `bin/planner4mcp` — the
+launcher picks a Node ≥ 18, so the entry does not hard-code `node`.
+
+User-level (`~/.cursor/mcp.json`, every project) or project-level (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "planner4mcp": {
+      "command": "/absolute/path/to/planner4mcp/bin/planner4mcp"
+    }
+  }
+}
+```
+
+`scripts/register-cursor.sh` writes the user-level file. It backs the file up first and leaves
+any other servers alone. Reload the window afterwards (or confirm the server under Settings → MCP).
+
 ### Configs that sync between machines
 
 A `.mcp.json` living in a synced folder — an iCloud-backed Obsidian vault, a shared git repo —
@@ -154,12 +178,19 @@ Mac" local account, where nothing else will ever see it. Check `list_accounts` a
 iCloud account's id explicitly. For existing calendars, `list_calendars` reports `source.type` —
 `calDAV` with the title `iCloud` is the synced one.
 
-**Identifiers are device-local.** `calendarIdentifier` and `eventIdentifier` are local to one
-Mac; the same event has different ids on two machines. This is invisible in normal use, because
-every tool call lists first and acts on ids from that same response within one session. It only
-breaks if ids are persisted somewhere or passed between machines — looking up an id on Mac A and
-deleting it on Mac B will fail. EventKit's `calendarItemExternalIdentifier` is the cross-device
-stable one; it is not currently exposed, and would need to be added if that workflow is wanted.
+**`id` is device-local. `externalId` is the cross-device one, with limits.** Events return
+`eventIdentifier` as `id`; reminders return `calendarItemIdentifier`. Both are local to one Mac.
+Looking an `id` up on Mac A and deleting it on Mac B fails. Every list, get, and `list_agenda`
+item also includes `externalId`, which is EventKit's `calendarItemExternalIdentifier`.
+
+Apple's own notes on that property, which this server does not paper over:
+
+- For iCloud and CalDAV it is the server id, so the same event or reminder matches across devices. Mutations still take `id`. This server does not look items up by `externalId`.
+- A repeating event has one `externalId` for every occurrence. Tell occurrences apart with `occurrenceDate` (or the start), not with `externalId`. A collapsed agenda pair keeps the event's `externalId` and the reminder's as `reminderExternalId`.
+- Calendars that live only on this Mac, including Birthdays, just echo `calendarItemIdentifier`. There is no other device for that id to match.
+- It can be missing on an item that has not been saved into a calendar yet.
+- The same value can show up more than once (an ICS file imported into several calendars, an event you were invited to that also lives on a calendar shared with you, a delegate calendar, a subscription added to more than one account). `id` plus calendar is still how you pick one.
+- Exchange: the identifier differs between EventKit on iOS and on macOS, and for reminders it differs between devices. Do not treat an Exchange `externalId` as stable across an iPhone and this Mac.
 
 ### What will not work
 
@@ -180,7 +211,7 @@ onto this codebase.
 | `check_access` | TCC status for both entity types, plus today's date and timezone |
 | `list_accounts` | Underlying accounts (iCloud, Local, Exchange, subscribed) |
 | `list_calendars` | Calendars and/or reminder lists — ids, color, owner account, writability, default flag |
-| `create_calendar` | New calendar or reminder list |
+| `create_calendar` | New calendar or reminder list. The result includes `entity` and `isDefault`, same as `list_calendars` |
 | `update_calendar` | Rename / recolor |
 | `delete_calendar` | Delete a calendar and its contents (two-step) |
 
@@ -307,6 +338,8 @@ Pass `"recurrence": null` on an update to strip an existing rule.
 ```bash
 npm run build:bridge          # Swift only
 npm run build:ts              # TypeScript only
+npm run smoke                 # build:ts, then initialize + tools/list
+npm test                      # full build, then scripts/verify.mjs against live EventKit
 
 # talk to the bridge directly, bypassing MCP
 ./build/ekbridge calendars.list '{"entity":"reminder"}'
@@ -317,6 +350,14 @@ node scripts/smoke.mjs                              # initialize + tools/list
 node scripts/smoke.mjs list_calendars '{}'
 node scripts/smoke.mjs create_reminder '{"title":"test","due":"2026-07-26T09:00"}'
 ```
+
+`npm test` creates throwaway calendars and reminder lists prefixed `planner4mcp selftest` and
+deletes them at the end, including after a failure. It needs macOS, a built bridge, and Calendar
+and Reminders access. Rebuilding the Swift binary ad-hoc-signs it again and can make macOS ask
+for that access once more.
+
+GitHub Actions only runs `npm ci` and `npm run build:ts` on Linux. It does not build the bridge
+or call EventKit.
 
 Bridge methods: `ping`, `access.status`, `access.request`, `sources.list`, `calendars.{list,create,update,delete}`,
 `events.{list,get,create,update,delete,freeTime}`, `reminders.{list,get,create,update,delete,complete}`.

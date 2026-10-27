@@ -702,6 +702,23 @@ final class Bridge {
         return out
     }
 
+    /// Same shape as `calendars.list`: entity plus whether this is the default for new items.
+    func calendarPayload(_ c: EKCalendar, entity: EKEntityType) -> [String: Any] {
+        let defId = entity == .event
+            ? store.defaultCalendarForNewEvents?.calendarIdentifier
+            : store.defaultCalendarForNewReminders()?.calendarIdentifier
+        var d = serializeCalendar(c)
+        d["entity"] = entity == .event ? "event" : "reminder"
+        d["isDefault"] = (c.calendarIdentifier == defId)
+        return d
+    }
+
+    /// `calendarItemExternalIdentifier`. Empty or missing stays absent rather than `""`.
+    func putExternalId(_ item: EKCalendarItem, into out: inout [String: Any]) {
+        guard let ext = item.calendarItemExternalIdentifier, !ext.isEmpty else { return }
+        out["externalId"] = ext
+    }
+
     func serializeParticipant(_ p: EKParticipant) -> [String: Any] {
         var out: [String: Any] = [
             "name": p.name ?? "",
@@ -727,6 +744,7 @@ final class Bridge {
             "isDetached": e.isDetached,
             "hasRecurrence": (e.recurrenceRules?.isEmpty == false)
         ]
+        putExternalId(e, into: &out)
         if e.isAllDay {
             out["start"] = dayString(e.startDate)
             out["end"] = dayString(e.endDate)
@@ -767,6 +785,7 @@ final class Bridge {
             "priority": r.priority,
             "priorityLabel": priorityLabel(r.priority)
         ]
+        putExternalId(r, into: &out)
         if let d = r.completionDate { out["completionDate"] = isoString(d) }
         if let due = serializeComponents(r.dueDateComponents) { out["due"] = due }
         if let start = serializeComponents(r.startDateComponents) { out["start"] = start }
@@ -861,23 +880,11 @@ final class Bridge {
             var out: [[String: Any]] = []
             if want == "all" || want == "event" {
                 try ensureEvents()
-                let def = store.defaultCalendarForNewEvents?.calendarIdentifier
-                out += store.calendars(for: .event).map { c -> [String: Any] in
-                    var d = serializeCalendar(c)
-                    d["entity"] = "event"
-                    d["isDefault"] = (c.calendarIdentifier == def)
-                    return d
-                }
+                out += store.calendars(for: .event).map { calendarPayload($0, entity: .event) }
             }
             if want == "all" || want == "reminder" {
                 try ensureReminders()
-                let def = store.defaultCalendarForNewReminders()?.calendarIdentifier
-                out += store.calendars(for: .reminder).map { c -> [String: Any] in
-                    var d = serializeCalendar(c)
-                    d["entity"] = "reminder"
-                    d["isDefault"] = (c.calendarIdentifier == def)
-                    return d
-                }
+                out += store.calendars(for: .reminder).map { calendarPayload($0, entity: .reminder) }
             }
             return out
 
@@ -912,7 +919,7 @@ final class Bridge {
                 }
             }
             try store.saveCalendar(cal, commit: true)
-            return serializeCalendar(cal)
+            return calendarPayload(cal, entity: entity)
 
         case "calendars.update":
             let entityName = (p.string("entity") ?? "event").lowercased()
@@ -923,7 +930,7 @@ final class Bridge {
             if let t = p.string("title") { cal.title = t }
             if let hex = p.string("color") { cal.cgColor = try cgColorFromHex(hex) }
             try store.saveCalendar(cal, commit: true)
-            return serializeCalendar(cal)
+            return calendarPayload(cal, entity: entity)
 
         case "calendars.delete":
             let entityName = (p.string("entity") ?? "event").lowercased()

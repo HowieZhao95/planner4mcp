@@ -1,6 +1,6 @@
 {
   "name": "planner4mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for Apple Calendar and Reminders (EventKit), full CRUD",
   "license": "MIT",
   "repository": {
@@ -16,6 +16,8 @@
     "bin",
     "swift",
     "scripts",
+    "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {

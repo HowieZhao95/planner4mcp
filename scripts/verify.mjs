@@ -8,6 +8,7 @@
 //   /opt/homebrew/bin/node scripts/verify.mjs
 
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
@@ -151,6 +152,58 @@ async function run() {
     init.result?.protocolVersion === LATEST_PROTOCOL_VERSION,
     `server=${init.result?.protocolVersion} sdk=${LATEST_PROTOCOL_VERSION}`,
   );
+  const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+  check(
+    "server version matches package.json",
+    init.result?.serverInfo?.version === pkg.version,
+    `server=${init.result?.serverInfo?.version} package=${pkg.version}`,
+  );
+
+  const listedTools = await rpc("tools/list", {});
+  const byName = Object.fromEntries((listedTools.result?.tools ?? []).map((t) => [t.name, t]));
+  const readOnlyTools = [
+    "check_access",
+    "list_accounts",
+    "list_calendars",
+    "list_events",
+    "get_event",
+    "find_free_time",
+    "list_agenda",
+    "list_reminders",
+    "get_reminder",
+  ];
+  for (const name of readOnlyTools) {
+    const ann = byName[name]?.annotations;
+    check(
+      `${name} is annotated read-only`,
+      ann?.readOnlyHint === true && ann?.destructiveHint === false && ann?.idempotentHint === true,
+      JSON.stringify(ann),
+    );
+  }
+  for (const name of ["delete_calendar", "delete_events", "delete_reminders"]) {
+    const ann = byName[name]?.annotations;
+    check(
+      `${name} is annotated destructive`,
+      ann?.readOnlyHint === false && ann?.destructiveHint === true && ann?.idempotentHint === false,
+      JSON.stringify(ann),
+    );
+  }
+  for (const name of ["create_calendar", "create_event", "create_reminder"]) {
+    const ann = byName[name]?.annotations;
+    check(
+      `${name} is annotated as a non-idempotent create`,
+      ann?.readOnlyHint === false && ann?.destructiveHint === false && ann?.idempotentHint === false,
+      JSON.stringify(ann),
+    );
+  }
+  for (const name of ["update_calendar", "update_event", "update_reminder", "complete_reminders"]) {
+    const ann = byName[name]?.annotations;
+    check(
+      `${name} is annotated as an idempotent update`,
+      ann?.readOnlyHint === false && ann?.destructiveHint === false && ann?.idempotentHint === true,
+      JSON.stringify(ann),
+    );
+  }
 
   // ---- access
   section("Access");
@@ -191,6 +244,8 @@ async function run() {
   created.lists.push(newList.id);
   check("create_calendar returns an id", !!newList.id);
   check("create_calendar applied the color", newList.color === "#FF8800", `got ${newList.color}`);
+  check("create_calendar returns entity", newList.entity === "reminder", `got ${newList.entity}`);
+  check("create_calendar returns isDefault", newList.isDefault === false, `got ${newList.isDefault}`);
 
   const renamed = await must("update_calendar", {
     entity: "reminder",
@@ -198,6 +253,8 @@ async function run() {
     title: `${PREFIX} list renamed`,
   });
   check("update_calendar renamed it", renamed.title === `${PREFIX} list renamed`, `got ${renamed.title}`);
+  check("update_calendar returns entity", renamed.entity === "reminder", `got ${renamed.entity}`);
+  check("update_calendar returns isDefault", renamed.isDefault === false, `got ${renamed.isDefault}`);
 
   const calPreview = await must("delete_calendar", { entity: "reminder", id: newList.id });
   check("delete_calendar without confirm is a dry run", calPreview.dryRun === true);
@@ -230,6 +287,8 @@ async function run() {
   created.lists.push(testList.id);
   check("isolated event calendar created", !!testCal.id);
   check("isolated reminder list created", !!testList.id);
+  check("event calendar payload includes entity", testCal.entity === "event", `got ${testCal.entity}`);
+  check("event calendar payload includes isDefault", testCal.isDefault === false, `got ${testCal.isDefault}`);
   console.log(`  fixtures: calendar ${testCal.id} list ${testList.id}`);
 
   // ---- simple event
@@ -245,6 +304,7 @@ async function run() {
   });
   created.events.push(evt.id);
   check("create_event returns an id", !!evt.id);
+  check("event exposes externalId", typeof evt.externalId === "string" && evt.externalId.length > 0, String(evt.externalId));
   check("event start is 10:00", (evt.start ?? "").includes("T10:00"), `got ${evt.start}`);
   check("event is not all-day", evt.allDay === false);
   check("notes round-tripped", evt.notes === "created by verify.mjs");
@@ -253,6 +313,7 @@ async function run() {
 
   const fetched = await must("get_event", { id: evt.id });
   check("get_event returns the same event", fetched.id === evt.id && fetched.title === evt.title);
+  check("get_event returns externalId", fetched.externalId === evt.externalId, String(fetched.externalId));
 
   const moved = await must("update_event", {
     id: evt.id,
@@ -275,6 +336,10 @@ async function run() {
     "list_events finds it",
     listed.events.some((e) => e.id === evt.id),
     `${listed.total} events in window`,
+  );
+  check(
+    "list_events returns externalId",
+    listed.events.find((e) => e.id === evt.id)?.externalId === evt.externalId,
   );
   const searched = await must("list_events", {
     start: dayOffset(0),
@@ -351,6 +416,11 @@ async function run() {
   });
   created.reminders.push(rem.id);
   check("create_reminder returns an id", !!rem.id);
+  check(
+    "reminder exposes externalId",
+    typeof rem.externalId === "string" && rem.externalId.length > 0,
+    String(rem.externalId),
+  );
   check("due date has a time", rem.due?.hasTime === true, JSON.stringify(rem.due));
   check("due time is 09:00", (rem.due?.dateTime ?? "").includes("T09:00"), rem.due?.dateTime);
   check("priority high stored as 1", rem.priority === 1 && rem.priorityLabel === "high", `got ${rem.priority}`);
@@ -575,6 +645,15 @@ async function run() {
     "collapsePairs merges the mirrored event and reminder",
     pair?.kind === "event" && pair?.alsoAReminder === true && pair?.reminderId === agendaRem.id,
     JSON.stringify(pair),
+  );
+  check(
+    "agenda keeps both external ids on a collapsed pair",
+    pair?.externalId === agendaEvent.externalId && pair?.reminderExternalId === agendaRem.externalId,
+    JSON.stringify({ event: pair?.externalId, reminder: pair?.reminderExternalId }),
+  );
+  check(
+    "agenda reminder carries externalId",
+    day1?.items?.find((i) => i.id === solo.id)?.externalId === solo.externalId,
   );
   check(
     "timed items sort by time within the day",

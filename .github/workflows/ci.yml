@@ -1,0 +1,23 @@
+# TypeScript only. The Swift bridge and EventKit exist on macOS; this job does
+# not build them and does not need a calendar grant. Live coverage is `npm test`
+# on a Mac.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-ts:
+    name: TypeScript build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:ts

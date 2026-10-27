@@ -1,9 +1,11 @@
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { EventKitBridge } from "./bridge.js";
 
 export interface ToolDef {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  annotations?: ToolAnnotations;
 }
 
 const MAX_BATCH = Number(process.env.PLANNER4MCP_MAX_BATCH ?? 50);
@@ -564,6 +566,57 @@ export const TOOLS: ToolDef[] = [
   },
 ];
 
+const READ_ONLY: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+};
+const CREATE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+};
+const UPDATE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+};
+const DESTROY: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+};
+
+const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
+  check_access: READ_ONLY,
+  list_accounts: READ_ONLY,
+  list_calendars: READ_ONLY,
+  create_calendar: CREATE,
+  update_calendar: UPDATE,
+  delete_calendar: DESTROY,
+  list_events: READ_ONLY,
+  get_event: READ_ONLY,
+  create_event: CREATE,
+  update_event: UPDATE,
+  delete_events: DESTROY,
+  find_free_time: READ_ONLY,
+  list_agenda: READ_ONLY,
+  list_reminders: READ_ONLY,
+  get_reminder: READ_ONLY,
+  create_reminder: CREATE,
+  update_reminder: UPDATE,
+  complete_reminders: UPDATE,
+  delete_reminders: DESTROY,
+};
+
+for (const tool of TOOLS) {
+  const annotations = TOOL_ANNOTATIONS[tool.name];
+  if (!annotations) {
+    throw new Error(`No MCP annotations for tool ${tool.name}`);
+  }
+  tool.annotations = annotations;
+}
+
 // ---------------------------------------------------------------- agenda
 
 interface AgendaItem {
@@ -593,6 +646,7 @@ function eventToItem(e: any): AgendaItem {
   };
   if (e.location) item.location = e.location;
   if (e.occurrenceDate) item.occurrenceDate = e.occurrenceDate;
+  if (typeof e.externalId === "string" && e.externalId) item.externalId = e.externalId;
   // Listed on its starting day only; this says how far it reaches.
   if (from && to && to !== from) item.spansUntil = to;
   return item;
@@ -609,6 +663,7 @@ function reminderToItem(r: any): AgendaItem {
     list: r.listTitle,
   };
   if (r.priority) item.priority = r.priorityLabel;
+  if (typeof r.externalId === "string" && r.externalId) item.externalId = r.externalId;
   return item;
 }
 
@@ -641,14 +696,18 @@ function collapsePairs(items: AgendaItem[]): AgendaItem[] {
     const match = reminders.get(signature(i));
     if (match) {
       paired.add(match.id as string);
-      out.push({
+      const collapsed: AgendaItem = {
         ...i,
         kind: "event",
         alsoAReminder: true,
         reminderId: match.id,
         reminderList: match.list,
         reminderCompleted: match.completed,
-      });
+      };
+      if (typeof match.externalId === "string" && match.externalId) {
+        collapsed.reminderExternalId = match.externalId;
+      }
+      out.push(collapsed);
     } else {
       out.push(i);
     }
