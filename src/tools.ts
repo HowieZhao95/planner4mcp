@@ -535,8 +535,8 @@ export const TOOLS: ToolDef[] = [
   {
     name: "complete_reminders",
     description:
-      "Mark reminders done (or undone). Non-destructive, so no confirmation step. " +
-      "For a repeating reminder, completing it rolls it forward to the next occurrence.",
+      "Mark reminders done or undone. No confirmation step. " +
+      "Completing a repeating reminder rolls it to the next occurrence, so the same call is not idempotent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -586,6 +586,12 @@ const DESTROY: ToolAnnotations = {
   destructiveHint: true,
   idempotentHint: false,
 };
+// Repeating reminders advance on each complete, so this is not an idempotent update.
+const COMPLETE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+};
 
 const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   check_access: READ_ONLY,
@@ -605,7 +611,7 @@ const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   get_reminder: READ_ONLY,
   create_reminder: CREATE,
   update_reminder: UPDATE,
-  complete_reminders: UPDATE,
+  complete_reminders: COMPLETE,
   delete_reminders: DESTROY,
 };
 

@@ -196,11 +196,19 @@ async function run() {
       JSON.stringify(ann),
     );
   }
-  for (const name of ["update_calendar", "update_event", "update_reminder", "complete_reminders"]) {
+  for (const name of ["update_calendar", "update_event", "update_reminder"]) {
     const ann = byName[name]?.annotations;
     check(
       `${name} is annotated as an idempotent update`,
       ann?.readOnlyHint === false && ann?.destructiveHint === false && ann?.idempotentHint === true,
+      JSON.stringify(ann),
+    );
+  }
+  {
+    const ann = byName.complete_reminders?.annotations;
+    check(
+      "complete_reminders is destructive and not idempotent",
+      ann?.readOnlyHint === false && ann?.destructiveHint === true && ann?.idempotentHint === false,
       JSON.stringify(ann),
     );
   }

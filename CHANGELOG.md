@@ -11,9 +11,9 @@ A git tag and a GitHub Release are **not** created by this changelog. Cut those 
 - `list_agenda`: events and dated reminders in one day-grouped timeline, with overdue reminders and optional collapsing of mirrored event/reminder pairs.
 - `externalId` on events, reminders, and agenda items (`EKCalendarItem.calendarItemExternalIdentifier`). A collapsed pair also carries `reminderExternalId`. See the README for Exchange, local calendars, and recurring occurrences.
 - `create_calendar` and `update_calendar` return `entity` and `isDefault`, matching `list_calendars`.
-- MCP tool annotations: lists, gets, `find_free_time`, `list_agenda`, and `check_access` are read-only; creates are non-idempotent; updates and `complete_reminders` are idempotent; deletes are destructive.
-- `bin/planner4mcp` launcher, `scripts/setup-new-mac.sh`, and `scripts/register-desktop.sh`.
+- MCP tool annotations: lists, gets, `find_free_time`, `list_agenda`, and `check_access` are read-only; creates are non-idempotent; updates are idempotent; deletes and `complete_reminders` are destructive. Completing a repeating reminder rolls it forward, so `complete_reminders` is not idempotent.
 - `scripts/register-cursor.sh` and a Cursor `mcp.json` example that points at `bin/planner4mcp`.
+- Verify coverage for `list_agenda` and for `find_free_time` with multi-day all-day events (`allDayIsBusy`).
 - `npm test` (build + live EventKit verify) and `npm run smoke` (TypeScript build + protocol handshake).
 - Linux CI that runs `npm ci` and `npm run build:ts` only.
 
